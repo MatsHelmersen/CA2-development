@@ -8,8 +8,8 @@
 # Run `ls /fp/projects01/ec31/boccara-group/` once logged in and adjust.
 
 paths:
-  base_path: "/fp/projects01/ec31/boccara-group/Data/Animals/data"
-  output_base_path: "/fp/projects01/ec31/boccara-group/processed_data"
+  base_path: "/fp/projects01/ec31/boccara-group/mats/Animals"
+  output_base_path: "/fp/projects01/ec31/boccara-group/mats/ephys_output"
   # Fox compute/GPU nodes have local scratch storage that's much faster
   # than project storage for repeated small reads - worth using for the
   # same reason as stage_raw_locally on the network share locally.
@@ -17,4 +17,4 @@ paths:
   # the exact one Fox provides (see Foxdocs) rather than trusting this blindly.
   stage_raw_locally: "${LOCALSCRATCH}/ephys_staging"
   binary_cache_dir: "${LOCALSCRATCH}/ephys_binary_cache"
-  probe_json_override: null
+  probe_json_override: "/fp/projects01/ec31/boccara-group/mats/probe/ASSY-350-H20_sitemap.json"  # null -> use base.yaml's json_relative_path

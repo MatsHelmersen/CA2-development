@@ -1,8 +1,8 @@
 # local.yaml - paths for your Windows machine. Selected via --env local.
 
 paths:
-  base_path: "\\\\biotin4.hpc.uio.no\\boccaraarea2\\Data\\Animals\\data"
-  output_base_path: null            # null -> write alongside raw data
+  base_path: "C:/Users/matshhe/Desktop/CA2/data/Animals"
+  output_base_path: "C:/Users/matshhe/Desktop/CA2/spikesorting/animals"            # null -> write alongside raw data
   stage_raw_locally: null           # e.g. "C:/Users/matshhe/scratch" - recommended
                                      # given base_path is a network/UNC mount
   binary_cache_dir: null
