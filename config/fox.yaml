@@ -1,0 +1,20 @@
+# fox.yaml - paths on Fox. Selected via --env fox.
+#
+# Verify these against your actual project storage layout the first time -
+# I've followed the standard /fp/projects01/ecXX/ convention you confirmed,
+# but the exact subfolder names below (Data/Animals, processed_data, etc.)
+# are inferred from your local.yaml structure and Windows share name
+# ("boccaraarea2"), not confirmed against what actually exists on Fox.
+# Run `ls /fp/projects01/ec31/boccara-group/` once logged in and adjust.
+
+paths:
+  base_path: "/fp/projects01/ec31/boccara-group/Data/Animals/data"
+  output_base_path: "/fp/projects01/ec31/boccara-group/processed_data"
+  # Fox compute/GPU nodes have local scratch storage that's much faster
+  # than project storage for repeated small reads - worth using for the
+  # same reason as stage_raw_locally on the network share locally.
+  # $LOCALSCRATCH / $USERWORK are typical Fox scratch env vars - confirm
+  # the exact one Fox provides (see Foxdocs) rather than trusting this blindly.
+  stage_raw_locally: "${LOCALSCRATCH}/ephys_staging"
+  binary_cache_dir: "${LOCALSCRATCH}/ephys_binary_cache"
+  probe_json_override: null

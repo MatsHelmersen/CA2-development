@@ -1,0 +1,22 @@
+# data and large outputs never belong in git - only code/config does
+raw_data/
+processed_data/
+*.dat
+*.bin
+recording_binary/
+*_ks4/
+*_phy/
+scratch/
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+
+# environment
+.env
+
+# local editor/OS cruft
+.vscode/
+.DS_Store

@@ -1,0 +1,27 @@
+name: ephys_pipeline
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11          # kilosort4/spikeinterface tested on 3.10-3.12 as of this writing - verify against current docs before relying on this
+  - numpy
+  - scipy
+  - pandas
+  - pyyaml
+  - tqdm
+  - matplotlib
+  - pip
+  - pip:
+      - spikeinterface[full]
+      - kilosort
+      - probeinterface
+      # torch with CUDA is intentionally left out here - install it
+      # separately AFTER creating this env, matching the actual CUDA
+      # version available on the machine you're on:
+      #   local Windows: check `nvidia-smi` for your driver's supported CUDA version
+      #   Fox: check available CUDA modules (`module avail cuda` on Fox) -
+      #        the ibl-sorter repo notes their pipeline was tested on CUDA 12+,
+      #        Kilosort4 likely has similar requirements, but verify against
+      #        Kilosort4's own current install docs rather than trusting this
+      #        comment, since GPU/CUDA compatibility changes often.
+      # Then: pip install torch --index-url https://download.pytorch.org/whl/<cuXXX>

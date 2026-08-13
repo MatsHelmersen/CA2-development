@@ -1,0 +1,65 @@
+# base.yaml - parameters and thresholds that do NOT depend on which machine
+# you're running on. Paths live in local.yaml / fox.yaml instead - see
+# ARCHITECTURE.md section 4 for the split rationale.
+
+probe:
+  # relative to the repo, or an absolute path override in the environment
+  # file if you ever need one - see ARCHITECTURE.md section 7 open question
+  # about geometry: this must point at the CORRECTED sitemap JSON.
+  json_relative_path: "probe/ASSY-350-H20_sitemap.json"
+
+recording:
+  stream_name: "Record Node 101#Acquisition_Board-100.acquisition_board"
+  block_index: 0
+
+# channel IDs (0-indexed, raw recording channel order, NOT probe contact
+# order) wired to EMG/ECoG or otherwise known-broken, per animal.
+aux_channel_ids:
+  "213868": [63, 64, 65, 66]
+  "211355": [63, 64, 65, 66]
+
+bad_channel_detection:
+  dead_var_thresh: 1.0          # uV^2 on subsampled trace - tune to your gain
+  short_corr_thresh: 0.95
+  bad_channel_subsample_s: 30.0
+  run_ibl_std_check: true
+
+saturation_detection:
+  enabled: true
+  mute_before_sorting: true
+  chunk_s: 30.0
+  clip_fraction_of_range: 0.98
+  derivative_mad_multiple: 20.0
+  window_pad_ms: 5.0
+  hopeless_fraction_thresh: 0.5   # channel excluded outright above this
+
+sorting:
+  concatenate_sessions: true      # false only for days with a DV/drive move
+  auto_omit_bad_channels: true
+  min_channels_to_sort_shank: 2
+
+ks4_params:
+  do_CAR: true
+  Th_universal: 9
+  Th_learned: 8
+  nblocks: 5
+  dmin: null
+  dminx: null
+  min_template_size: 10
+  nearest_chans: 10               # see ARCHITECTURE.md section 7 - not yet
+                                   # empirically validated against corrected geometry
+  torch_device: "cuda:0"
+
+assessment:
+  run_unit_assessment: true
+  export_to_phy: true
+  thresholds:
+    min_spikes_total: 50
+    min_spikes_for_amplitude_cutoff: 300
+    snr_noise_max: 1.5
+    snr_sua_min: 4.0
+    isi_violations_ratio_sua_max: 0.02
+    isi_violations_ratio_noise_min: 0.5
+    isolation_distance_sua_min: 15.0
+    l_ratio_sua_max: 0.2
+    saturation_overlap_noise_frac: 0.25

@@ -1,0 +1,9 @@
+# local.yaml - paths for your Windows machine. Selected via --env local.
+
+paths:
+  base_path: "\\\\biotin4.hpc.uio.no\\boccaraarea2\\Data\\Animals\\data"
+  output_base_path: null            # null -> write alongside raw data
+  stage_raw_locally: null           # e.g. "C:/Users/matshhe/scratch" - recommended
+                                     # given base_path is a network/UNC mount
+  binary_cache_dir: null
+  probe_json_override: null         # null -> use base.yaml's json_relative_path
