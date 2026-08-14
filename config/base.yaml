@@ -31,7 +31,7 @@ saturation_detection:
   clip_fraction_of_range: 0.98
   derivative_mad_multiple: 20.0
   window_pad_ms: 5.0
-  hopeless_fraction_thresh: 0.5   # channel excluded outright above this
+  hopeless_fraction_thresh: 0.7   # channel excluded outright above this
 
 sorting:
   concatenate_sessions: true      # false only for days with a DV/drive move

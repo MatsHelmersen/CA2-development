@@ -34,6 +34,7 @@ module) - flagging for the user to update the comment.
 """
 
 import os
+import sys
 import glob
 import json
 import shutil
@@ -49,14 +50,12 @@ try:
 except ImportError:
     tqdm = None
 
-from config_loader import load_config  # sibling module in src/ - see KNOWN ISSUE above
-
-
-# Repo root, used to resolve base.yaml's `probe.json_relative_path` when no
-# environment-specific probe_json_override is set. Assumes this file lives
-# at <repo_root>/src/io_utils.py (per ARCHITECTURE.md Sec.3). If that's not
-# where io_utils.py ends up, this needs revisiting alongside issue #1 above.
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+# Repo root, assumes this file lives at <repo_root>/src/health_check.py (per ARCHITECTURE.md Sec.3). 
+# If that's not where io_utils.py ends up, this needs revisiting.
+from src.config_loader import load_config
 
 
 # ============================================================================
