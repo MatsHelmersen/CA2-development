@@ -12,8 +12,8 @@ recording:
   stream_name: "Record Node 101#Acquisition_Board-100.acquisition_board"
   block_index: 0
 
-# channel IDs (0-indexed, raw recording channel order, NOT probe contact
-# order) wired to EMG/ECoG or otherwise known-broken, per animal.
+# channel IDs (1-indexed OpenEphys channel labels, matching recording.get_channel_ids())
+# wired to EMG/ECoG or otherwise known-broken, per animal.
 aux_channel_ids:
   "213868": [63, 64, 65, 66]
   "211355": [63, 64, 65, 66]

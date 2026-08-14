@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-CONFIG_DIR = Path(__file__).resolve().parent / "config"
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
 def _deep_merge(base, override):
