@@ -57,9 +57,9 @@ ephys_workspace/
     │   ├── io_utils.py              # DONE — see §4a
     │   ├── health_check.py          # DONE — see §4b
     │   ├── artifact_cleaning.py     # DONE — see §4c
-    │   ├── ap_sorter.py             # NEXT — see §9
+    │   ├── ap_sorter.py             # DONE — see §4d
     │   ├── lfp_extractor.py
-    │   └── quality_control.py
+    │   └── quality_control.py       # NEXT — see §9
     ├── run_pipeline.py              # subcommands: health-check, sort, lfp, qc, phy-export
     └── environment.yml
 ```
@@ -67,17 +67,22 @@ ephys_workspace/
 Output location is decoupled from raw data location by design
 (config-driven, not hardcoded).
 
-**Status as of this session:** `io_utils.py`, `health_check.py`, and
-`artifact_cleaning.py` are all functionally complete for their stated
-scope and have been cross-checked against each other's contracts (the
-`saturation_windows.json` handoff, the `select_session`/`session_name`
-single-session path, and the `SaturationMutedRecording` import-path fix
-are all now consistent across the three modules — see §4a–§4c). The
-pipeline has never been run end-to-end against real data or a real
-SpikeInterface install in this conversation; see each module's
-"Verification status" note and §10 for concrete steps to run yourself
-before trusting a full batch. The next module is `ap_sorter.py` (§9),
-which is what actually chains these three together for the first time.
+**Status as of this session:** `io_utils.py`, `health_check.py`,
+`artifact_cleaning.py`, and `ap_sorter.py` are all functionally complete
+for their stated scope and cross-checked against each other's contracts
+(the `saturation_windows.json` handoff, the `select_session`/`session_name`
+single-session path, the `SaturationMutedRecording` import-path fix, and
+— new this session — the health_report.json exclusion-readback +
+saturation-muting reconstruction sequence, which now has exactly one
+implementation shared by `ap_sorter.py` and (going forward)
+`quality_control.py` — see §4c/§4d/§5). The pipeline has never been run
+end-to-end against real data or a real SpikeInterface install in this
+conversation; see each module's "Verification status" note and §10 for
+concrete steps to run yourself before trusting a full batch. The next
+module is `quality_control.py` (§9), which must reuse
+`artifact_cleaning.reconstruct_clean_recording_for_shank()` rather than
+reimplementing exclusion + muting independently — see §9 for why this
+matters concretely, not just as a style preference.
 
 ## 4. Config schema
 
@@ -222,14 +227,21 @@ correct public API for start timestamps should be confirmed against the
 installed SI version before relying on this as anything more than a
 best-effort check.
 
-## 4c. `artifact_cleaning.py` — interface (DONE)
+## 4c. `artifact_cleaning.py` — interface (DONE, scope expanded this session)
 
 Scope: consumes saturation windows detected upstream by `health_check.py`
 and applies per-(channel, sample-range) muting as a lazy SpikeInterface
 preprocessing wrapper, before Kilosort4 runs. Also hosts the (currently
-unimplemented) periodic-discharge remediation stub. Explicitly excludes
-detection of any kind (bad channels, saturation, discharge — all stay in
-`health_check.py`), Kilosort4/sorting, and unit assessment.
+unimplemented) periodic-discharge remediation stub. **Expanded this
+session:** also owns reading back `health_report.json` exclusions and
+composing them with saturation muting into the one reconstruction
+sequence that reproduces exactly what Kilosort4 saw for a shank — this
+was previously split across `ap_sorter.py` (exclusion readback) and here
+(muting only); moved so `quality_control.py` can call the same sequence
+instead of reimplementing it (see `reconstruct_clean_recording_for_shank`
+below, and §5/§9). Explicitly excludes detection of any kind (bad
+channels, saturation, discharge — all stay in `health_check.py`), the
+`si.run_sorter()` call itself (`ap_sorter.py`), and unit assessment.
 
 Public functions:
 - `load_saturation_windows(day_output_dir)` → `dict`. Reads
@@ -242,10 +254,43 @@ Public functions:
   specific recording passed in*, at call time (not at detection time —
   see §5 rationale). No-op passthrough if the shank has no entry (either
   it was SKIPPED at health-check, or nothing was flagged). **Does not
-  itself consult `cfg["saturation_detection"]["mute_before_sorting"]`** —
-  see the open flag under §9 / "Known gap to close" below; that check is
-  the caller's (`ap_sorter.py`'s) responsibility as currently designed,
-  flagged explicitly rather than assumed.
+  itself consult `cfg["saturation_detection"]["mute_before_sorting"]`**
+  — that check now lives one level up, in
+  `reconstruct_clean_recording_for_shank` (below), not in the caller
+  module. This was previously `ap_sorter.py`'s responsibility (§9's old
+  "Known gap to close") — resolved this session by moving the gate
+  itself here, alongside the function it gates.
+- `load_health_report(day_output_dir)` → `dict`. **Moved from
+  `ap_sorter.py` this session.** Reads `health_report.json` (§5). Raises
+  `FileNotFoundError` with an actionable message if missing — same
+  "never health-checked ≠ silently clean" rationale as
+  `load_saturation_windows`.
+- `get_shank_exclusion_ids(health_report, shank_id)` → `(status: str,
+  exclude_ids: set[str], detail: dict|None)`. **Moved from
+  `ap_sorter.py` this session**, unchanged behaviour. `status` is
+  `"PASS"`, `"SKIPPED"`, or `"MISSING"`.
+- `apply_health_report_exclusions(shank_rec, exclude_ids)` →
+  `(clean_recording, missing_ids: set[str])`. **Moved from `ap_sorter.py`
+  this session**, unchanged behaviour. Channels in `exclude_ids` absent
+  from `shank_rec` are skipped with a printed warning, not an error.
+- `reconstruct_clean_recording_for_shank(cfg, shank_id, shank_rec,
+  health_report, saturation_windows)` → `dict` with keys `status`
+  (`"PASS"` | `"SKIPPED"` | `"MISSING"` | `"SKIPPED_MIN_CHANNELS"`),
+  `recording` (or `None` unless PASS), `exclude_ids`, `missing_ids`,
+  `muted` (bool), `message`, `shank_health`. **New this session — the
+  single source of truth** for "what did Kilosort4 actually see (or
+  would it see) for this shank": composes
+  `get_shank_exclusion_ids` → `apply_health_report_exclusions` → a
+  min-channel re-check against the *current* recording object (stale
+  reports produce `"SKIPPED_MIN_CHANNELS"`, distinct from
+  health-check-time `"SKIPPED"`) → `mute_saturation_for_shank`, gated on
+  `cfg["saturation_detection"]["mute_before_sorting"]`. `ap_sorter.py`
+  calls this immediately before `si.run_sorter()`.
+  **`quality_control.py` must call this too**, with the same
+  `cfg`/`health_report`/`saturation_windows` a given sort run used,
+  before building a `SortingAnalyzer` — see §5 and §9 for why divergence
+  here is a correctness bug (mismatched waveforms/metrics), not a style
+  issue.
 - `SaturationMutedRecording` / `_SaturationMutedSegment` — the lazy
   muting wrapper itself (subclasses `si.BasePreprocessor` /
   `BasePreprocessorSegment` from
@@ -302,6 +347,81 @@ derived absolute channel indices from a `slice` via
 general slice→range conversion (worked for the specific cases exercised
 in `sort_batch.py`, not guaranteed for others). Rewritten to resolve
 against the segment's actual total channel count instead.
+
+## 4d. `ap_sorter.py` — interface (DONE)
+
+Scope: Kilosort4 execution, one shank at a time. Chains
+`io_utils.prepare_day()` (or `prepare_day` + `select_session` for
+single-session days) → `recording.split_by("group")` →
+`artifact_cleaning.reconstruct_clean_recording_for_shank()` (health-report
+exclusions + gated saturation muting — see §4c) → per-shank existing-output
+check → `si.run_sorter("kilosort4", ...)`. Explicitly excludes bad-channel
+/ saturation / discharge *detection* (`health_check.py`), the muting
+*mechanism* and exclusion-readback (both now `artifact_cleaning.py`, §4c),
+and unit assessment / phy export (`quality_control.py`).
+
+Design decisions (see module docstring for full reasoning):
+1. **Exclusion source = `health_report.json` readback, not re-detection.**
+   Re-running bad-channel/saturation detection here would double the cost
+   of `health_check.py --report` and could silently diverge from the
+   report a human already reviewed. `load_health_report()` (now in
+   `artifact_cleaning.py`, §4c) raises `FileNotFoundError` if missing —
+   a day that was never health-checked is never silently sorted as clean.
+2. **`bad_channel_ids` field (channel-ID-keyed) added to
+   `health_report.json`**, additive alongside the pre-existing
+   `bad_reasons` (local-index-keyed, kept for the human-readable report).
+   `ap_sorter.py`/`artifact_cleaning.py` read `bad_channel_ids`. Running
+   against an older `health_report.json` without this field means
+   bad-channel exclusion silently does nothing — re-run `health_check.py
+   --report` to regenerate it.
+3. **`mute_before_sorting` gating** — **resolved this session** (was
+   listed as an open gap; see §7). The flag is checked inside
+   `artifact_cleaning.reconstruct_clean_recording_for_shank()`, not in
+   `ap_sorter.py` itself (moved there along with the rest of the
+   exclusion/muting sequence — see §4c and §5).
+4. **Existing-output check is per-shank** (`shank_<id>_ks4/params.py`
+   present), not per-day like `sort_batch.py`'s original — a partially
+   sorted day (e.g. after a crash) is resumable shank-by-shank.
+
+Public functions:
+- `existing_shank_output_present(day_output_dir, shank_id)` → `bool`.
+- `sort_one_shank(cfg, shank_id, shank_rec, health_report,
+  saturation_windows, day_output_dir, ks4_params,
+  existing_output_action="skip", dry_run=False)` → `dict` with `status`
+  ∈ `{"SORTED", "SKIPPED", "ERROR", "DRY_RUN"}`. Calls
+  `artifact_cleaning.reconstruct_clean_recording_for_shank()` first;
+  does not itself apply exclusions or muting any more (§4c). Does not
+  raise on ordinary skip/error conditions — reported in the returned
+  dict so a caller can continue past one bad shank.
+- `process_animal_day(cfg, animal_id, date_str, session_name=None,
+  shank_filter=None, skip_staging=True, existing_output_action="skip",
+  dry_run=False)` → summary `dict` (`sorted`/`skipped`/`errors` lists of
+  human-readable strings). Loads `health_report.json` +
+  `saturation_windows.json` once per day/session (both via
+  `artifact_cleaning.py`), splits by shank, calls `sort_one_shank()` per
+  shank (or just `shank_filter`, if given), writes `ap_sorter_log.json`
+  (this module's own resume/debug bookkeeping — **not** a documented
+  cross-module contract; see module docstring if you want to promote it
+  to one).
+- `write_ap_sorter_log(day_output_dir, animal_id, date_str,
+  shank_results)` → `str` (path written).
+
+Module-local verification:
+- `self_check(cfg, day_output_dir=None)` → `list[(level, message)]`.
+  Config-key presence (`ks4_params`, `sorting.min_channels_to_sort_shank`,
+  `saturation_detection.mute_before_sorting`); with `day_output_dir`,
+  also validates `health_report.json`'s `bad_channel_ids` field is
+  present (warns if it predates that fix) and that
+  `saturation_windows.json` sits alongside it.
+- CLI: `python ap_sorter.py --env {local,fox,biotin} [--check
+  [--day-output-dir PATH | --animal ANIMAL --date YYYYMMDD
+  [--session-name NAME]]] | [--run --animal ANIMAL --date YYYYMMDD
+  [--session-name NAME] [--shank ID] [--with-staging]
+  [--existing-output-action skip|overwrite|prompt] [--dry-run]]`.
+
+**Verification status:** not yet exercised against real data or a real
+SpikeInterface/Kilosort4 install in this conversation — same caveat as
+§4a–§4c. See §10 for concrete steps.
 
 ## 5. Cross-module data contracts
 
@@ -378,20 +498,45 @@ Treat changes to these as breaking changes requiring a note here.
   `io_utils.get_day_output_dir(cfg, animal_id, date_str,
   session_name=<basename>)` and selects that one session's path via
   `io_utils.select_session(session_paths, session_name)`. `io_utils.py`
-  (`check_day`), `health_check.py` (`generate_health_report`), and
-  `artifact_cleaning.py`'s CLI all now do this the same way. `ap_sorter.py`
-  should follow the same pattern rather than re-deriving session-specific
-  paths independently.
+  (`check_day`), `health_check.py` (`generate_health_report`),
+  `artifact_cleaning.py`'s CLI, and `ap_sorter.py`
+  (`process_animal_day`) all now do this the same way. Any future module
+  needing single-session output paths should follow the same pattern
+  rather than re-deriving it independently.
 
 - **`io_utils.prepare_day()` return dict**: `recording` (probe-attached,
   aux-removed, not split by shank), `session_metadata`, `fs`, `aux_ids`,
   `day_output_dir`, `session_boundaries_path`. Handoff point from
-  `io_utils.py` onward. Expected downstream flow (not yet wired into a
-  caller — see §9): split by shank → bad-channel/hopeless exclusion
-  (mirroring what `health_check.py` already did at report time) →
-  `artifact_cleaning.mute_saturation_for_shank(shank_rec, shank_id,
-  saturation_windows)` → Kilosort4. `day_output_dir` from this dict is
-  what `artifact_cleaning.load_saturation_windows()` expects.
+  `io_utils.py` onward. **Downstream flow is now implemented**
+  (`ap_sorter.process_animal_day`, §4d): split by shank →
+  `artifact_cleaning.reconstruct_clean_recording_for_shank()` (below) →
+  Kilosort4. `day_output_dir` from this dict is what
+  `artifact_cleaning.load_saturation_windows()` /
+  `load_health_report()` expect.
+
+- **`artifact_cleaning.reconstruct_clean_recording_for_shank(cfg,
+  shank_id, shank_rec, health_report, saturation_windows)`** — **added
+  this session; the canonical shared contract `quality_control.py` must
+  use.** Returns `{"status", "recording", "exclude_ids", "missing_ids",
+  "muted", "message", "shank_health"}`; `status` is one of `"PASS"`,
+  `"SKIPPED"`, `"MISSING"`, `"SKIPPED_MIN_CHANNELS"`. This is the one
+  place health-report exclusions and `mute_before_sorting`-gated
+  saturation muting are composed, in order. **Why this is a contract and
+  not an implementation detail:** `quality_control.py` will build a
+  `SortingAnalyzer` from a shank's KS4 output; if it reconstructs the
+  input recording differently than `ap_sorter.py` did at sort time (e.g.
+  skips the mute gate, or re-derives exclusions itself instead of
+  reading `health_report.json` back), the waveforms/metrics it computes
+  will not correspond to what KS4 actually clustered spikes on — a
+  silent correctness bug, not a style inconsistency. `quality_control.py`
+  must call this function with the same `cfg` /
+  `health_report.json` / `saturation_windows.json` the sort run used, not
+  reimplement the sequence. Previously this logic lived split across
+  `ap_sorter.py` (exclusion readback: `load_health_report`,
+  `get_shank_exclusion_ids`, `apply_health_report_exclusions`) and
+  `artifact_cleaning.py` (muting only); all four functions now live in
+  `artifact_cleaning.py` (§4c) — moved this session, flagged as an
+  interface change rather than made silently.
 
 ## 6. Conventions (don't relitigate without reason)
 
@@ -466,11 +611,14 @@ Treat changes to these as breaking changes requiring a note here.
   in as a subcommand.
 - **`check_session_ordering`** accesses a private SI attribute for
   start timestamps — see §4b caveat.
-- **`mute_before_sorting` flag is not yet wired to anything** — see §9
-  "Known gap to close." `mute_saturation_for_shank()` has no awareness of
-  `cfg["saturation_detection"]["mute_before_sorting"]` at all; this is
-  `ap_sorter.py`'s open design decision to make, not something to guess
-  at silently.
+- **`mute_before_sorting` flag wiring — RESOLVED this session.**
+  `artifact_cleaning.reconstruct_clean_recording_for_shank()` (§4c, §5)
+  now checks `cfg["saturation_detection"]["mute_before_sorting"]` and
+  gates the call to `mute_saturation_for_shank()` on it.
+  `ap_sorter.sort_one_shank()` calls the reconstruction function and no
+  longer checks the flag itself. `quality_control.py` will pick up the
+  same gating automatically by calling the same shared function — no
+  separate wiring needed there.
 
 ## 8. Coding conventions
 
@@ -486,42 +634,56 @@ Treat changes to these as breaking changes requiring a note here.
   session_name=...)` for single-session handling rather than
   reimplementing it per module (see §5, §6).
 
-## 9. Suggested prompt for the next session (`ap_sorter.py`)
+## 9. Suggested prompt for the next session (`quality_control.py`)
 
 > Continuing work on `ephys_pipeline`. Read `ARCHITECTURE.md` first, then
-> `io_utils.py`, `health_check.py`, and `artifact_cleaning.py` from Project
-> knowledge before writing any code. All three are DONE and their
-> interfaces are stable as documented in §4a–§4c; treat their public
-> functions as fixed unless you find an actual bug.
+> `io_utils.py`, `health_check.py`, `artifact_cleaning.py`, and
+> `ap_sorter.py` from Project knowledge before writing any code. All four
+> are DONE and their interfaces are stable as documented in §4a–§4d;
+> treat their public functions as fixed unless you find an actual bug.
 >
-> **Module:** `src/ap_sorter.py`
+> **Module:** `src/quality_control.py`
 >
-> **Goal:** Kilosort4 execution, one shank at a time, wiring together the
-> three modules that now exist but have never actually been chained
-> together: `io_utils.prepare_day()` (or `prepare_day` + `select_session`
-> for single-session days, per §5's session-specific-path contract) →
-> split by shank → bad-channel / hopeless-saturation exclusion (mirroring
-> what `health_check.py` already computes at report time — decide here
-> whether to re-run detection or read it back from
-> `health_report.json`/`saturation_windows.json`; flag whichever you pick,
-> since it's a real design choice, not a detail) →
-> `artifact_cleaning.load_saturation_windows()` +
-> `artifact_cleaning.mute_saturation_for_shank()` →
-> `si.run_sorter("kilosort4", ...)`. Also owns the existing-output check
-> (`shank_*_ks4` + `params.py` present) that `sort_batch.py` had — this
-> was explicitly excluded from `io_utils.py`'s scope as sorter-specific.
+> **Goal:** post-sort unit assessment — classify every unit per shank
+> into `"Noise/Artefact"` / `"MUA"` / `"SUA"` (§6 conventions: SNR not
+> absolute amplitude, isolation distance / L-ratio per Schmitzer-Torbert
+> et al. 2005, no hard gate on firing rate or whole-day presence ratio),
+> compute per-session presence ratio (§5 `session_boundaries.json`
+> contract) and saturation overlap (`merge_windows_across_channels`),
+> export to Phy (`export_to_phy`, `copy_binary=True` — known dtype
+> gotcha, SpikeInterface GH #2751, wrap defensively), and write
+> `run_summary.csv` (§5 contract: commented metadata header + units
+> table, `pandas.read_csv(path, comment='#')` for programmatic reads).
+> This was previously `assess_shank`/`assess_only_day`/
+> `write_run_summary_csv` in `sort_batch.py` — port the logic, not the
+> monolithic structure.
 >
-> **Known gap to close:** nothing currently calls
-> `artifact_cleaning.mute_saturation_for_shank()` — it exists and is
-> written (import path confirmed against a real install; `get_traces()`
-> correctness still unverified — see §4c), but no caller wires
-> `cfg["saturation_detection"]["mute_before_sorting"]` through to it yet.
-> Confirm in this session whether `ap_sorter.py` should skip muting
-> entirely when that flag is `False`, and where that check belongs
-> (caller vs. inside `mute_saturation_for_shank` itself — currently the
-> function has no awareness of the flag at all, which is arguably a bug
-> in `artifact_cleaning.py`, not `ap_sorter.py` — flag it explicitly
-> rather than guessing).
+> **Non-negotiable constraint, not a suggestion:** to build a
+> `SortingAnalyzer` against a shank's KS4 output, you need the *exact*
+> recording KS4 was given as input — same channels excluded, same
+> saturation windows muted (or not). That reconstruction is
+> **`artifact_cleaning.reconstruct_clean_recording_for_shank(cfg,
+> shank_id, shank_rec, health_report, saturation_windows)`** (§4c, §5) —
+> call it, do not reimplement exclusion-then-muting yourself. Load
+> `health_report.json` via `artifact_cleaning.load_health_report()` and
+> `saturation_windows.json` via `artifact_cleaning.load_saturation_windows()`,
+> exactly as `ap_sorter.process_animal_day()` does, then split by shank
+> and call the reconstruction function per shank before building each
+> `SortingAnalyzer`. If reconstruction returns anything other than
+> `status == "PASS"` for a shank that nonetheless has KS4 output on disk,
+> that's a stale-report situation worth surfacing loudly (it means the
+> report changed after that shank was sorted) — don't silently skip or
+> silently proceed with an unreconstructed recording.
+>
+> **Open design question to resolve in this session, not silently:**
+> `--assess-only` re-assessment (re-running unit assessment on already-
+> sorted output without re-sorting, e.g. after changing
+> `assessment_thresholds`) existed in `sort_batch.py`. Decide whether
+> `quality_control.py` keeps this mode, and if so, confirm it still goes
+> through `reconstruct_clean_recording_for_shank()` for the recording it
+> builds the analyzer against — a re-assessment that skips reconstruction
+> and loads the raw split-by-shank recording directly would silently
+> assess against un-excluded, un-muted channels.
 >
 > Ground rules: flag any required interface or config key change before
 > making it. At the end of the session, summarise what should be updated
@@ -535,7 +697,7 @@ Treat changes to these as breaking changes requiring a note here.
 None of the following has been exercised in this conversation
 (`spikeinterface` is not installed in the sandbox these modules were
 written in) — run these yourself before a full batch, not just before
-`ap_sorter.py`:
+`quality_control.py`:
 
 1. **`io_utils.py`**: `python io_utils.py --env local --check` (cheap),
    then `python io_utils.py --env local --check-day ANIMAL_ID DATE`
@@ -562,8 +724,39 @@ written in) — run these yourself before a full batch, not just before
    - On one real shank from step 2, run
      `mute_saturation_for_shank()` and plot a flagged window before/after
      muting to confirm visually.
-4. **End-to-end** (once `ap_sorter.py` exists): run it on one known day,
-   confirm `shank_*_ks4/params.py` is written, and spot-check that muted
-   windows are actually zero in what KS4 sees (e.g. via
-   `si.run_sorter`'s intermediate binary, if it writes one) rather than
-   just trusting the wrapper was applied.
+   - **New this session:** on the same shank, call
+     `reconstruct_clean_recording_for_shank()` directly with
+     `mute_before_sorting` set `True` and then `False` in a copied
+     config, and confirm `result["muted"]` and the resulting
+     `get_num_channels()` differ as expected between the two calls, and
+     that `status == "SKIPPED_MIN_CHANNELS"` is actually reachable (e.g.
+     by temporarily lowering a shank's channel count in a test
+     `health_report.json` copy below `min_channels_to_sort_shank`).
+4. **`ap_sorter.py`**:
+   - `python ap_sorter.py --env local --check --animal ANIMAL_ID --date
+     DATE` after step 2, to confirm `health_report.json`'s
+     `bad_channel_ids` field and `saturation_windows.json` are both
+     present and well-formed for that day.
+   - `python ap_sorter.py --env local --run --animal ANIMAL_ID --date
+     DATE --dry-run` to see, per shank, how many channels would actually
+     be sorted (post-exclusion, post-min-channel-check) without calling
+     Kilosort4 — sanity-check this count against `health_report.json`'s
+     `viable_channels_remaining` for that shank.
+   - Then run without `--dry-run` on one real shank, confirm
+     `shank_<id>_ks4/params.py` is written, and spot-check that muted
+     windows are actually zero in what KS4 saw (e.g. via
+     `si.run_sorter`'s intermediate binary, if it writes one) rather than
+     just trusting the wrapper was applied — this was previously listed
+     as an "End-to-end" step for `ap_sorter.py` before it existed; it's
+     now concrete and should be run.
+5. **`quality_control.py`** (once it exists): pick one already-sorted
+   shank, build a `SortingAnalyzer` via
+   `reconstruct_clean_recording_for_shank()` as the module will, and
+   independently confirm its channel count matches `ap_sorter_log.json`
+   / the actual `recording.dat` channel count inside that shank's
+   `shank_<id>_ks4/` folder — a mismatch here would mean the shared
+   reconstruction function and the actual KS4 run have diverged (e.g.
+   `health_report.json` or `saturation_windows.json` were regenerated
+   between sorting and assessment), which is exactly the class of bug
+   this session's refactor was meant to make structurally harder to hit,
+   not impossible to hit.

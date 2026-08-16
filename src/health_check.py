@@ -956,6 +956,18 @@ def generate_health_report(cfg, animal_id, date_str, skip_staging=True,
         "config_env": cfg_for_check.get("_env", "unknown"),
         "shanks": {},
     }
+    # Accumulator for saturation_windows.json (ARCHITECTURE.md Sec.5 "NEW
+    # CONTRACT", documented in artifact_cleaning.py's module docstring but
+    # never actually implemented here until now - see session note where
+    # this was caught). Channel-ID-keyed (not local-index-keyed), unlike
+    # per_channel_sat below which is local-to-clean_rec-at-this-instant.
+    # Only PASS shanks with at least one flagged window get an entry -
+    # SKIPPED shanks were never precisely scanned (see the "STATUS: SKIPPED"
+    # branch above, which never reaches the precise-scan block below).
+    saturation_windows_data = {
+        "sampling_frequency": fs,
+        "shanks": {},
+    }
     text_lines = [
         f"HEALTH REPORT: {animal_id} / {date_str}",
         f"Generated:     {report_data['generated_at']}",
@@ -982,6 +994,18 @@ def generate_health_report(cfg, animal_id, date_str, skip_staging=True,
             "initial_channels": shank_rec.get_num_channels(),
             "bad_channels_detected": len(bad_local),
             "bad_reasons": reasons_serialisable,
+            # bad_channel_ids (added): channel-ID-keyed list, unlike bad_reasons above
+            # which is keyed by LOCAL index into shank_rec as it existed in THIS
+            # process at report time. A local index is not safe for a downstream
+            # consumer running in a separate process (e.g. ap_sorter.py) to reuse
+            # against its own recording object - same instability
+            # artifact_cleaning.py's NEW CONTRACT note already identified and
+            # fixed for saturation_windows.json; bad_reasons had the same latent
+            # bug and was simply never consumed cross-process until now.
+            # bad_reasons is left in place (still useful for the human-readable
+            # report / debugging), bad_channel_ids is the one downstream code
+            # should actually key exclusion off of.
+            "bad_channel_ids": [],
             "saturated_hopeless_channels": [],
             "viable_channels_remaining": 0,
             "status": "UNKNOWN",
@@ -995,6 +1019,7 @@ def generate_health_report(cfg, animal_id, date_str, skip_staging=True,
 
         # Build clean recording after bad-channel exclusion
         chan_ids = shank_rec.get_channel_ids()
+        shank_info["bad_channel_ids"] = [str(c) for i, c in enumerate(chan_ids) if i in bad_local]
         clean_ids = [c for i, c in enumerate(chan_ids) if i not in bad_local]
         clean_rec = shank_rec.select_channels(clean_ids)
 
@@ -1048,6 +1073,18 @@ def generate_health_report(cfg, animal_id, date_str, skip_staging=True,
                 shank_info["saturation_windows_flagged"] = n_windows
                 text_lines.append(f"  Precise saturation windows flagged: {n_windows}")
 
+                if per_channel_sat:
+                    # per_channel_sat is keyed by LOCAL index into clean_rec as it
+                    # exists right now, in this process - not safe to write to disk
+                    # as-is (same instability already called out for bad_reasons /
+                    # bad_channel_ids above). Convert to the actual channel_id
+                    # before it ever leaves this function's scope.
+                    clean_chan_ids_now = clean_rec.get_channel_ids()
+                    saturation_windows_data["shanks"][str(shank_id)] = {
+                        str(clean_chan_ids_now[local_idx]): [[int(s), int(e)] for s, e in windows]
+                        for local_idx, windows in per_channel_sat.items()
+                    }
+
             # -- Spectral discharge check (optional) -------------------------
             if run_spectral_check:
                 print(f"    Spectral discharge check...")
@@ -1075,6 +1112,7 @@ def generate_health_report(cfg, animal_id, date_str, skip_staging=True,
     os.makedirs(day_output_dir, exist_ok=True)
     json_path = os.path.join(day_output_dir, "health_report.json")
     txt_path = os.path.join(day_output_dir, "health_report.txt")
+    sat_windows_path = os.path.join(day_output_dir, "saturation_windows.json")
 
     with open(json_path, "w") as f:
         json.dump(report_data, f, indent=2)
@@ -1082,7 +1120,15 @@ def generate_health_report(cfg, animal_id, date_str, skip_staging=True,
     with open(txt_path, "w") as f:
         f.write("\n".join(text_lines) + "\n")
 
-    print(f"\n  Reports written to:\n    {json_path}\n    {txt_path}")
+    # Written UNCONDITIONALLY (possibly with an empty "shanks": {}), same as
+    # health_report.json - so "file missing" always means "never
+    # health-checked", never "nothing was flagged". See ARCHITECTURE.md
+    # Sec.5 saturation_windows.json contract and artifact_cleaning.py's
+    # load_saturation_windows(), which relies on exactly this guarantee.
+    with open(sat_windows_path, "w") as f:
+        json.dump(saturation_windows_data, f, indent=2)
+
+    print(f"\n  Reports written to:\n    {json_path}\n    {txt_path}\n    {sat_windows_path}")
     return True
 
 

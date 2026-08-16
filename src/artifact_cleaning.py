@@ -14,8 +14,44 @@ Scope (per ARCHITECTURE.md Sec.9, Sec.5, Sec.7):
 
 Explicitly OUT of scope (belongs elsewhere):
   - Detecting saturation windows / bad channels / discharge peaks -> health_check.py
-  - Kilosort4 / sorting                                          -> ap_sorter.py
-  - Unit assessment / classification                             -> quality_control.py
+  - Kilosort4 / sorting itself (si.run_sorter call)                -> ap_sorter.py
+  - Unit assessment / classification                               -> quality_control.py
+
+============================================================================
+SCOPE CHANGE (flagged, not silent) - health_report.json reconstruction
+moved here from ap_sorter.py
+============================================================================
+
+Previously, "read health_report.json exclusions back and apply them" lived
+entirely in ap_sorter.py (load_health_report / get_shank_exclusion_ids /
+apply_health_report_exclusions), and saturation muting lived here. Both
+were only ever called together, in the same order, inside
+ap_sorter.sort_one_shank(). That order (bad-channel + hopeless-saturation
+exclusion, THEN mute_before_sorting-gated saturation muting) is exactly
+what Kilosort4 saw for a given shank - and it is exactly what
+quality_control.py will need to reconstruct too, so that the
+SortingAnalyzer/waveforms it computes are built against the SAME samples
+KS4 actually clustered on, not a similar-but-independently-reimplemented
+recording.
+
+RESOLUTION: load_health_report(), get_shank_exclusion_ids(), and
+apply_health_report_exclusions() have been moved here verbatim (same
+signatures, same behaviour), and a new function,
+reconstruct_clean_recording_for_shank(), composes them with
+mute_saturation_for_shank() in the one correct order. This is now the
+SINGLE SOURCE OF TRUTH for "what recording did KS4 actually see (or
+would it see) for this shank" - ap_sorter.py calls it before
+si.run_sorter(), and quality_control.py must call it (with the same
+cfg / health_report / saturation_windows a given sort run used) before
+building a SortingAnalyzer, rather than reimplementing the exclusion +
+muting order independently and risking drift between what was sorted and
+what is being assessed.
+
+ap_sorter.py has been updated to import these from here rather than
+defining its own copies - see that module's docstring for the
+corresponding note. This IS an interface change (functions moved between
+modules); flagged here and in ARCHITECTURE.md Sec.4c/Sec.5/Sec.9 rather
+than made silently, per project convention.
 
 CLI vs. library scope, since these differ here (unlike io_utils.py and
 health_check.py, whose CLIs run their main pipeline actions directly):
@@ -314,6 +350,200 @@ def merge_windows_across_channels(per_channel_windows: dict) -> list:
     """
     all_windows = [w for wins in per_channel_windows.values() for w in wins]
     return sorted(all_windows)
+
+
+# ============================================================================
+# health_report.json READBACK + FULL SHANK RECONSTRUCTION
+# (moved here from ap_sorter.py - see "SCOPE CHANGE" note in module
+# docstring above for why)
+# ============================================================================
+
+def load_health_report(day_output_dir: str) -> dict:
+    """
+    Read health_report.json for one animal/day(/session). Raises
+    FileNotFoundError with an actionable message if missing - this module
+    deliberately does NOT fall back to "no exclusions" or re-run
+    detection itself (mirrors load_saturation_windows()'s existing
+    pattern above, for the same reason: a day that was never
+    health-checked should not be silently treated as if every channel
+    were clean).
+
+    MOVED FROM ap_sorter.py (unchanged behaviour/signature) - see
+    "SCOPE CHANGE" note in this module's docstring.
+    """
+    path = os.path.join(day_output_dir, "health_report.json")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"health_report.json not found at {path}. Run health_check.py --report "
+            f"for this animal/day first - this module reads bad-channel and "
+            f"hopeless-saturation exclusions back from that report rather than "
+            f"re-detecting them (see this module's docstring, 'SCOPE CHANGE' note, "
+            f"and ap_sorter.py's original Design Decision 1)."
+        )
+    with open(path) as f:
+        return json.load(f)
+
+
+def get_shank_exclusion_ids(health_report: dict, shank_id) -> tuple:
+    """
+    Look up one shank's entry in a loaded health_report.json dict.
+
+    Returns (status: str, exclude_ids: set[str], detail: dict|None).
+    status is "PASS", "SKIPPED", or "MISSING" (no entry at all - e.g. a
+    stale health_report.json from before this shank grouping, or a
+    typo'd shank_id). exclude_ids is the union of bad_channel_ids and
+    saturated_hopeless_channels (channel-ID strings) - empty set if
+    status is not "PASS" (a SKIPPED shank's exclusion set is meaningless;
+    the whole shank is not being sorted/assessed).
+
+    MOVED FROM ap_sorter.py (unchanged behaviour/signature).
+    """
+    shank_health = health_report.get("shanks", {}).get(str(shank_id))
+    if shank_health is None:
+        return "MISSING", set(), None
+
+    status = shank_health.get("status", "UNKNOWN")
+    if status != "PASS":
+        return status, set(), shank_health
+
+    bad_ids = set(str(c) for c in shank_health.get("bad_channel_ids", []))
+    hopeless_ids = set(str(c) for c in shank_health.get("saturated_hopeless_channels", []))
+    return "PASS", bad_ids | hopeless_ids, shank_health
+
+
+def apply_health_report_exclusions(shank_rec, exclude_ids: set):
+    """
+    select_channels() to drop exclude_ids (channel-ID strings, from
+    get_shank_exclusion_ids()) from shank_rec. Channels in exclude_ids
+    not present in shank_rec (already gone for some other reason, or a
+    stale report) are skipped with a printed warning rather than raising
+    - matches this module's _channel_windows_for_shank()'s "mute what's
+    still here" degradation, for the same reason: a stale report should
+    warn loudly, not crash a batch run.
+
+    Returns (clean_recording, missing_ids: set).
+
+    MOVED FROM ap_sorter.py (unchanged behaviour/signature).
+    """
+    chan_ids = list(shank_rec.get_channel_ids())
+    id_by_str = {str(c): c for c in chan_ids}
+    present_str = set(id_by_str.keys())
+
+    missing = exclude_ids - present_str
+    keep_str = [c for c in present_str if c not in exclude_ids]
+    # Preserve original channel order rather than set() order.
+    keep_str_ordered = [str(c) for c in chan_ids if str(c) in keep_str]
+    keep_ids = [id_by_str[c] for c in keep_str_ordered]
+
+    return shank_rec.select_channels(keep_ids), missing
+
+
+def reconstruct_clean_recording_for_shank(cfg: dict, shank_id, shank_rec,
+                                           health_report: dict, saturation_windows: dict) -> dict:
+    """
+    Reconstruct, for one shank, the exact recording Kilosort4 was (or
+    would be) handed: health_report.json exclusions (bad channels +
+    hopeless-saturation channels) -> minimum-viable-channel re-check
+    against THIS recording object -> saturation-window muting, gated on
+    cfg["saturation_detection"]["mute_before_sorting"] (originally
+    ap_sorter.py's "Design Decision 3" - the gating check itself still
+    lives here now, as the one place exclusion+muting order is decided).
+
+    THIS IS THE SINGLE SOURCE OF TRUTH for "what did KS4 actually see for
+    this shank". ap_sorter.py calls this immediately before
+    si.run_sorter(). quality_control.py MUST call this too - with the
+    same cfg, health_report.json, and saturation_windows.json a given
+    sort run used - before building a SortingAnalyzer against a shank's
+    sorting output. Building the analyzer against a recording that was
+    reconstructed differently (skipping the mute_before_sorting gate,
+    applying exclusions in a different order, or re-deriving exclusions
+    from scratch instead of reading health_report.json back) would
+    silently compute waveforms/metrics against different samples than
+    what KS4 actually clustered spikes on. Do not reimplement this
+    exclusion+muting sequence independently elsewhere in the pipeline.
+
+    Parameters
+    ----------
+    cfg               : merged config dict (reads sorting.min_channels_to_sort_shank
+                         and saturation_detection.mute_before_sorting)
+    shank_id          : shank identifier matching health_report.json / recording.split_by("group") keys
+    shank_rec         : SpikeInterface recording for this one shank, BEFORE any
+                         exclusion or muting (as returned by recording.split_by("group")[shank_id])
+    health_report     : parsed health_report.json (from load_health_report())
+    saturation_windows : parsed saturation_windows.json (from load_saturation_windows())
+
+    Returns a dict with keys:
+        status       : "PASS" | "SKIPPED" | "MISSING" | "SKIPPED_MIN_CHANNELS".
+                       "SKIPPED_MIN_CHANNELS" is new relative to
+                       get_shank_exclusion_ids()'s status values: it means
+                       health_report.json said PASS, but re-applying its
+                       recorded exclusions to THIS recording object
+                       leaves fewer than min_channels_to_sort_shank
+                       channels - i.e. the report is stale relative to
+                       the recording actually being handled right now.
+        recording    : reconstructed recording (clean + lazily muted if
+                       applicable), or None unless status == "PASS".
+        exclude_ids  : set[str] of channel IDs excluded per health_report.json.
+        missing_ids  : set[str] of exclude_ids not present in shank_rec
+                       (already gone upstream, or a stale report).
+        muted        : bool - whether saturation muting was actually applied
+                       (False if mute_before_sorting=False, or if status != "PASS").
+        message      : human-readable one-line explanation, always present.
+        shank_health : the raw per-shank health_report.json entry, or None
+                       if status == "MISSING".
+    """
+    status, exclude_ids, shank_health = get_shank_exclusion_ids(health_report, shank_id)
+
+    if status == "MISSING":
+        msg = (f"No entry for shank {shank_id} in health_report.json - either a stale "
+               f"report (probe/shank grouping changed) or health_check.py --report was "
+               f"never run against this exact recording.")
+        return {"status": "MISSING", "recording": None, "exclude_ids": set(),
+                "missing_ids": set(), "muted": False, "message": msg, "shank_health": None}
+
+    if status != "PASS":
+        msg = (f"health_report.json status={status} for shank {shank_id} "
+               f"({shank_health.get('skip_reason', 'no reason recorded')}).")
+        return {"status": status, "recording": None, "exclude_ids": exclude_ids,
+                "missing_ids": set(), "muted": False, "message": msg, "shank_health": shank_health}
+
+    clean_rec, missing_ids = apply_health_report_exclusions(shank_rec, exclude_ids)
+    if missing_ids:
+        print(f"    Warning: shank {shank_id} health_report.json references "
+              f"{len(missing_ids)} channel(s) not present in the current recording "
+              f"(already excluded upstream, or the report is stale relative to this "
+              f"recording): {sorted(missing_ids)}")
+
+    min_chans = cfg.get("sorting", {}).get("min_channels_to_sort_shank", 2)
+    if clean_rec.get_num_channels() < min_chans:
+        msg = (f"After applying health_report.json exclusions, {clean_rec.get_num_channels()} "
+               f"channel(s) remain on shank {shank_id} (< min_channels_to_sort_shank={min_chans}). "
+               f"health_report.json recorded this shank as PASS with "
+               f"{shank_health.get('viable_channels_remaining', '?')} viable channel(s) at "
+               f"report time - this recording is likely stale relative to that report "
+               f"(different config exclusions, or the report predates a change upstream). "
+               f"Re-run health_check.py --report before sorting/assessing this shank.")
+        return {"status": "SKIPPED_MIN_CHANNELS", "recording": None, "exclude_ids": exclude_ids,
+                "missing_ids": missing_ids, "muted": False, "message": msg,
+                "shank_health": shank_health}
+
+    sat_cfg = cfg.get("saturation_detection", {})
+    if sat_cfg.get("mute_before_sorting", True):
+        clean_rec = mute_saturation_for_shank(clean_rec, shank_id, saturation_windows)
+        muted = True
+        msg = (f"Shank {shank_id}: {len(exclude_ids)} channel(s) excluded per "
+               f"health_report.json; saturation muting applied (mute_before_sorting=True); "
+               f"{clean_rec.get_num_channels()} channel(s) remain.")
+    else:
+        muted = False
+        msg = (f"Shank {shank_id}: {len(exclude_ids)} channel(s) excluded per "
+               f"health_report.json; saturation muting SKIPPED "
+               f"(saturation_detection.mute_before_sorting=False) - flagged windows, if "
+               f"any, are left in the data exactly as KS4 saw them.")
+
+    return {"status": "PASS", "recording": clean_rec, "exclude_ids": exclude_ids,
+            "missing_ids": missing_ids, "muted": muted, "message": msg,
+            "shank_health": shank_health}
 
 
 # ============================================================================
