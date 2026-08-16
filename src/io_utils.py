@@ -183,6 +183,44 @@ def find_sessions(cfg: dict, animal_filter: str = None) -> dict:
     return grouped
 
 
+def select_session(session_paths: list, session_name: str) -> list:
+    """
+    Filter a session_paths list (as returned by find_sessions() for one
+    (animal_id, date_str) key) down to the single path whose basename
+    matches session_name exactly (e.g. "20231105_002").
+
+    Returns a 1-element list (not a bare path) so the result can be
+    passed straight to prepare_day()'s session_paths argument - a
+    1-element list with concatenate=False is exactly what prepare_day()
+    already recognises as "individual session mode" (see its
+    individual_session_mode check), so no changes to prepare_day() itself
+    are needed to support single-session runs.
+
+    Raises ValueError, listing the session names that WERE found for this
+    animal/day, if session_name doesn't match any of them - a typo'd
+    session name should fail loudly here, not silently fall through to
+    "process the whole day" (via an unfiltered list) or "process nothing"
+    (via a silently empty list).
+    """
+    matches = [p for p in session_paths if os.path.basename(p) == session_name]
+    if not matches:
+        available = [os.path.basename(p) for p in session_paths]
+        raise ValueError(
+            f"session_name '{session_name}' not found among this animal/day's "
+            f"sessions. Available: {available}"
+        )
+    # basenames are unique by construction (find_sessions globs distinct
+    # directories), so at most one match is possible - this is a defensive
+    # check, not an expected path.
+    if len(matches) > 1:
+        raise ValueError(
+            f"session_name '{session_name}' matched more than one path - "
+            f"this should not be possible given how find_sessions() builds "
+            f"its paths; investigate: {matches}"
+        )
+    return matches
+
+
 def stage_sessions_locally(cfg: dict, animal_id: str, date_str: str, session_paths: list) -> list:
     """
     Copy raw OpenEphys session folders to local scratch
@@ -511,7 +549,8 @@ def self_check(cfg: dict, animal_filter: str = None) -> list:
     return results
 
 
-def check_day(cfg: dict, animal_id: str, date_str: str, skip_staging: bool = True) -> bool:
+def check_day(cfg: dict, animal_id: str, date_str: str, skip_staging: bool = True,
+               session_name: str = None) -> bool:
     """
     Heavier, opt-in check: actually runs prepare_day() on ONE animal/day and
     reports what came back, without doing anything downstream (no
@@ -523,12 +562,24 @@ def check_day(cfg: dict, animal_id: str, date_str: str, skip_staging: bool = Tru
     so a spot-check doesn't wait on a full network copy - pass False to
     verify staging itself.
 
+    session_name : if given (e.g. "20231105_002"), restricts this check to
+        that ONE session rather than every session found for animal_id/
+        date_str, and forces prepare_day(concatenate=False) - matching
+        prepare_day()'s existing "individual session mode" (a 1-element
+        session_paths list with concatenate=False), so the day_output_dir
+        gets the session-specific suffix rather than the day-level path.
+        Use this for a day where the probe/drive was moved between
+        sessions (never concatenate across a depth change - ARCHITECTURE.md
+        Sec.6) and you want to spot-check just one of them.
+
     Reports: session count, per-session frame count and duration, TTL
     presence per session, final channel/shank count post aux-removal, and
     whether session_boundaries.json round-trips through json.load(). Returns
     True if no problems found, False otherwise (does not raise).
     """
-    print(f"\n{'='*70}\ncheck_day: {animal_id} / {date_str} (env={cfg.get('_env', '?')})\n{'='*70}")
+    print(f"\n{'='*70}\ncheck_day: {animal_id} / {date_str}"
+          f"{f' / session {session_name}' if session_name else ''} "
+          f"(env={cfg.get('_env', '?')})\n{'='*70}")
     ok = True
 
     grouped = find_sessions(cfg, animal_filter=animal_id)
@@ -538,6 +589,16 @@ def check_day(cfg: dict, animal_id: str, date_str: str, skip_staging: bool = Tru
               f"and that find_sessions() sees this animal at all.")
         return False
     session_paths = grouped[key]
+
+    concatenate = True
+    if session_name is not None:
+        try:
+            session_paths = select_session(session_paths, session_name)
+        except ValueError as e:
+            print(f"  [FAIL] {e}")
+            return False
+        concatenate = False  # 1-element list + concatenate=False -> individual session mode
+
     print(f"  Found {len(session_paths)} session(s): {[os.path.basename(p) for p in session_paths]}")
 
     cfg_for_check = cfg
@@ -554,7 +615,8 @@ def check_day(cfg: dict, animal_id: str, date_str: str, skip_staging: bool = Tru
         return False
 
     try:
-        result = prepare_day(cfg_for_check, animal_id, date_str, session_paths, probe)
+        result = prepare_day(cfg_for_check, animal_id, date_str, session_paths, probe,
+                              concatenate=concatenate)
     except Exception as e:
         print(f"  [FAIL] prepare_day() raised: {e}")
         return False
@@ -612,6 +674,11 @@ if __name__ == "__main__":
                          help="Run check_day(): actually loads ONE animal/day (OpenEphys read, "
                               "probe binding, session_boundaries.json write) and reports on it. "
                               "Slower than --check, but tells you it actually works end-to-end.")
+    parser.add_argument("--session-name", default=None,
+                         help="With --check-day, restrict to a single session (e.g. "
+                              "'20231105_002') instead of every session found for that "
+                              "animal/day - forces individual-session mode (no concatenation). "
+                              "Use for a day where the probe/drive was moved between sessions.")
     parser.add_argument("--with-staging", action="store_true",
                          help="With --check-day, don't bypass stage_raw_locally - actually test the "
                               "staging copy too (slower).")
@@ -621,7 +688,8 @@ if __name__ == "__main__":
 
     if args.check_day:
         animal_id, date_str = args.check_day
-        passed = check_day(cfg, animal_id, date_str, skip_staging=not args.with_staging)
+        passed = check_day(cfg, animal_id, date_str, skip_staging=not args.with_staging,
+                            session_name=args.session_name)
         raise SystemExit(0 if passed else 1)
     elif args.check:
         results = self_check(cfg, animal_filter=args.animal)

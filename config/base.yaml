@@ -33,6 +33,14 @@ saturation_detection:
   window_pad_ms: 5.0
   hopeless_fraction_thresh: 0.7   # channel excluded outright above this
 
+discharge_detection:
+  enabled: true                  # set false to skip entirely (fast)
+  freq_range_hz: [800, 1200]     # search band Hz — [300, 5000] would be below LFP, above KS4 cutoff
+  floor_window_hz: 200.0         # rolling window for local spectral floor estimate
+  peak_snr_thresh: 10.0          # flag if peak exceeds local floor by this factor
+  n_windows: 3                   # number of windows sampled from recording
+  window_s: 5.0                  # length of each window in seconds
+
 sorting:
   concatenate_sessions: true      # false only for days with a DV/drive move
   auto_omit_bad_channels: true
