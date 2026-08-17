@@ -138,7 +138,7 @@ def existing_shank_output_present(day_output_dir: str, shank_id) -> bool:
     to one shank rather than "any shank_*_ks4 folder in this day" - this
     module can resume a partially-sorted day shank-by-shank.
     """
-    params_path = os.path.join(day_output_dir, f"shank_{shank_id}_ks4", "params.py")
+    params_path = os.path.join(day_output_dir, f"shank_{shank_id}_ks4", "sorter_output", "params.py")
     return os.path.exists(params_path)
 
 

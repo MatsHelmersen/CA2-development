@@ -35,7 +35,7 @@ saturation_detection:
 
 discharge_detection:
   enabled: true                  # set false to skip entirely (fast)
-  freq_range_hz: [800, 1200]     # search band Hz — [300, 5000] would be below LFP, above KS4 cutoff
+  freq_range_hz: [300, 5000]     # search band Hz — [300, 5000] would be below LFP, above KS4 cutoff
   floor_window_hz: 200.0         # rolling window for local spectral floor estimate
   peak_snr_thresh: 10.0          # flag if peak exceeds local floor by this factor
   n_windows: 3                   # number of windows sampled from recording
