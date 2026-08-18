@@ -15,7 +15,10 @@ recording:
 # channel IDs (1-indexed OpenEphys channel labels, matching recording.get_channel_ids())
 # wired to EMG/ECoG or otherwise known-broken, per animal.
 aux_channel_ids:
-  "213868": [63, 64, 65, 66]
+  "213868": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            21, 22, 23, 24, 25, 26, 30, 67, 69, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+            83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+            63, 64, 65, 66]
   "211355": [63, 64, 65, 66]
 
 bad_channel_detection:

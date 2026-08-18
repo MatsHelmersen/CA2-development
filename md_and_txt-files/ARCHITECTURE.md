@@ -63,7 +63,7 @@ ephys_workspace/
     │   ├── ap_sorter.py             # DONE — see §4d
     │   ├── quality_control.py       # DONE — see §4e
     │   └── lfp_extractor.py         # NOT STARTED
-    ├── run_pipeline.py              # subcommands: health-check, sort, lfp, qc, phy-export — NOT YET WIRED, see §4 OPEN ISSUE
+    ├── run_pipeline.py              # DONE, NOT YET TESTED — see §4f
     └── environment.yml
 ```
 
@@ -71,26 +71,33 @@ Output location is decoupled from raw data location by design
 (config-driven, not hardcoded).
 
 **Status as of this session:** `io_utils.py`, `health_check.py`,
-`artifact_cleaning.py`, `ap_sorter.py`, and `quality_control.py` are all
-functionally complete for their stated scope and cross-checked against
-each other's contracts. `quality_control.py` has since been updated
-twice more after its initial version: once for two real bugs surfaced by
-running against actual data (`sorter_output/params.py` path, §4d-bugfix;
-cross-environment `register_recording=False`, §4e-bugfix), and again
-this session (§4e-bugfix2) for a set of SpikeInterface API updates
-(`mahalanobis` metric naming, `noise_levels`/`spike_amplitudes`
-prerequisite extensions, `remove_excess_spikes`) plus a new QC
-visualization capability (§11). A cross-module grep this session
-confirmed no other current module touches the SpikeInterface analyzer
-APIs these fixes concern — `quality_control.py` is the only consumer.
-The pipeline has never been run end-to-end against real data or a real
-SpikeInterface install in this conversation beyond the specific errors
-reported back and fixed above; see each module's "Verification status"
-note and §10 for concrete steps to run yourself before trusting a full
-batch. The next module is `lfp_extractor.py` (not yet started, not
-scoped in this document), after which `run_pipeline.py`'s config
-mismatch (see §4 OPEN ISSUE) needs resolving before any module can be
-wired in as a Slurm-friendly subcommand.
+`artifact_cleaning.py`, `ap_sorter.py`, `quality_control.py`, and (new)
+`run_pipeline.py` are all functionally complete for their stated scope
+and cross-checked against each other's contracts. `quality_control.py`
+was updated twice after its initial version: once for two real bugs
+surfaced by running against actual data (`sorter_output/params.py` path,
+§4d-bugfix; cross-environment `register_recording=False`, §4e-bugfix),
+and once more for a set of SpikeInterface API updates (`mahalanobis`
+metric naming, `noise_levels`/`spike_amplitudes` prerequisite
+extensions, `remove_excess_spikes`) plus a QC visualization capability
+(§11). `run_pipeline.py` (§4f, this session) is a pure delegation layer
+over the other four modules — see §4f for its self-consistency-tested
+(not real-data-tested) status.
+
+**The pipeline as a whole has still never been run end-to-end against
+real data or a real SpikeInterface install in this conversation** beyond
+the specific errors reported back and fixed above; see each module's
+"Verification status" note and §10 for concrete steps to run yourself
+before trusting a full batch. **Work on this pipeline is on hold as of
+this session** — the user is moving on to other work and will run the
+three data-touching modules (`health_check.py --report` →
+`ap_sorter.py --run` → `quality_control.py --run`, chained manually,
+confirmed equivalent to `run_pipeline.py run-all` — see §4f) against
+real data before returning. `run_pipeline.py` itself and `lfp_extractor.py`
+(not started) are both deferred until after that first real run. See §7
+for the open questions to resolve first, and §12 (new) for the
+manual-curation workflow gap that should be designed before
+`lfp_extractor.py` or any cross-session unit-tracking work begins.
 
 ## 4. Config schema
 
@@ -123,10 +130,11 @@ wired in as a Slurm-friendly subcommand.
   environment-specific — same rationale as the rest of `assessment:`,
   §4).
 
-**OPEN ISSUE (unchanged):** `run_pipeline.py` does not use
-`config_loader.load_config()` — it reads a non-existent
-`config/config.yaml` with a different key schema. Needs reconciling
-before any module can be wired into it as a subcommand.
+**OPEN ISSUE — RESOLVED this session:** `run_pipeline.py` now exists and
+uses `config_loader.load_config(env)` exclusively — no `config/config.yaml`
+or any other config file is read anywhere in it. There was no old
+`run_pipeline.py` in the project to migrate; this was a fresh build. See
+§4f.
 
 ## 4a. `io_utils.py` — interface (DONE)
 
@@ -662,6 +670,90 @@ already applied in the current project copy. The legacy, superseded
 API patterns but was deliberately left untouched — flag if it's still in
 active use somewhere and it should be kept in sync too.
 
+## 4f. `run_pipeline.py` — interface (DONE, NOT YET TESTED)
+
+Scope: CLI entry point wiring `health_check.py` / `ap_sorter.py` /
+`quality_control.py` together via `config_loader.load_config(env)`.
+Pure delegation layer — every subcommand calls an existing public
+function in another module and does not reimplement any pipeline logic.
+Resolves the previous §4 OPEN ISSUE (no `run_pipeline.py` existed in the
+project prior to this session; this is a fresh build, not a migration).
+
+**Status: written and self-consistency-tested (argument parsing,
+`--job-list`/`--job-index` resolution, exit codes, `run-all` sequencing —
+verified against stub replacements of `src/*` in a sandbox with no
+SpikeInterface install). NOT exercised against real data, real
+SpikeInterface, or a real Fox Slurm submission.** The user has since
+chosen to defer this testing and run `health_check.py --report` →
+`ap_sorter.py --run` → `quality_control.py --run` manually in sequence
+instead for current work — **this is functionally equivalent**:
+`run_pipeline.py run-all` calls exactly those three functions in exactly
+that order, with no additional logic in between. See §10 for the
+concrete steps to run before trusting `run_pipeline.py` itself (as
+opposed to the three modules it wraps, which have their own
+already-flagged unverified status).
+
+Subcommands (each takes `--env {local,fox,biotin}` before the
+subcommand name):
+- `list-jobs [--animal ID] [--out PATH]` — writes a CSV manifest
+  (`job_index,animal_id,date_str,n_sessions`) of every `(animal_id,
+  date_str)` group found via `io_utils.find_sessions()`, for Slurm array
+  use. Prints the matching `#SBATCH --array=0-N` line.
+- `health-check --preflight [--check-ordering] [--animal ID]` /
+  `health-check --report {--animal/--date/--session-name |
+  --job-list/--job-index} [--spectral-check] [--with-staging]` — wraps
+  `health_check.run_preflight()` / `generate_health_report()` unchanged.
+- `sort {...day selection...} [--shank ID] [--existing-output-action
+  skip|overwrite|prompt] [--dry-run]` — wraps
+  `ap_sorter.process_animal_day()` unchanged.
+- `qc {...day selection...} [--shank ID] [--dry-run]
+  [--skip-phy-export] [--skip-plots]` — wraps
+  `quality_control.process_animal_day()` unchanged.
+- `phy-export {...day selection...} [--shank ID] [--with-plots]` —
+  **NOT a cheaper/decoupled path.** Internally identical to `qc` with
+  `skip_phy_export=False` forced and `skip_plots=True` defaulted, because
+  `quality_control.export_shank_to_phy()` is only ever called from
+  inside `assess_shank()`, reusing the same `SortingAnalyzer` the metrics
+  computation builds — there is no cheaper way to get a Phy folder
+  without also recomputing the full unit assessment. Flagged rather than
+  silently presented as lightweight. A genuinely decoupled re-export
+  would require refactoring `quality_control.py` to cache/rebuild the
+  analyzer independently of `assess_shank()` — not done, out of scope
+  unless requested.
+- `run-all {...day selection...} [--shank ID] [--spectral-check]
+  [--existing-output-action ...] [--dry-run] [--skip-phy-export]
+  [--skip-plots] [--skip-health-check] [--skip-sort] [--skip-qc]
+  [--continue-on-error]` — sequences `health-check --report` → `sort` →
+  `qc` for one animal/day. Stops at the first failed stage unless
+  `--continue-on-error`. **Equivalent to, and no more than, manually
+  running the three modules' own CLIs in sequence** — see the note
+  above.
+- `check [--animal ID --date DATE [--session-name NAME]]` — aggregates
+  `io_utils.self_check()` + `artifact_cleaning.self_check()` +
+  `ap_sorter.self_check()` + `quality_control.self_check()` in one call.
+  **Deliberately separate from `health-check --preflight`**: this
+  checks config/module-wiring consistency (config keys present, output
+  files present where a module expects them); `--preflight` checks
+  environment/hardware readiness (GPU, disk, packages, probe geometry).
+  Running one does not substitute for the other.
+
+**Day-selection interface (Slurm array support, new this session):**
+every day-scoped subcommand accepts EITHER `--animal ID --date YYYYMMDD
+[--session-name NAME]` directly, OR `--job-list PATH --job-index N`
+(0-based row into a `list-jobs` manifest — designed to be
+`$SLURM_ARRAY_TASK_ID` directly in an `sbatch` script). **The manifest
+is day-level only** — `--session-name` is rejected (hard error, not a
+silent ignore) when combined with `--job-list`, since session-split days
+(probe/drive moved mid-day, §6) are the exception, not the batch-array
+common case. Run those specific days as one-off explicit
+`--animal/--date/--session-name` invocations instead.
+
+**Not added, deliberately:** a "loop over every animal/day found on
+disk" mode for `sort`/`qc`. True batch processing on Fox should be a
+Slurm job array (§2: "one task per animal/day, not a single sequential
+process") — exactly what `--job-list`/`--job-index` is for. Encouraging
+a sequential loop outside Slurm was intentionally avoided.
+
 ## 5. Cross-module data contracts
 
 - **`session_boundaries.json`**: `{"sampling_frequency": fs, "sessions":
@@ -762,6 +854,34 @@ active use somewhere and it should be kept in sync too.
 
 ## 7. Open questions
 
+- **No round-trip for manual Phy curation decisions (NEW, highest
+  priority before trusting any downstream analysis).** `quality_control.py`
+  writes `run_summary.csv`'s `classification` column from
+  `classify_unit()`'s heuristic thresholds, and separately exports each
+  shank to `shank_<id>_phy/` for manual inspection (§12). Once a person
+  curates in Phy (merging/splitting clusters, relabeling noise, spot-
+  checking borderline SUA/MUA calls per the QC figures, §11), **nothing
+  reads those decisions back.** `run_summary.csv`'s `classification`
+  column stays the original heuristic output forever unless someone
+  manually edits the CSV or re-derives it from Phy's
+  `cluster_group.tsv`/`cluster_info.tsv` by hand. This means:
+  (a) there is currently no single authoritative "final" unit list/label
+  set after curation - the heuristic CSV and the curated Phy state can
+  silently diverge with no pipeline-level record of which one was used
+  for a given downstream analysis; (b) any future module (e.g. a
+  unit-tracking/registration step across sessions, or `lfp_extractor.py`
+  if it ever needs unit-aligned LFP) that wants "the real, curated
+  units" has no function to call - it would need to read Phy's output
+  files directly and reinvent this. **Not designed or scoped in this
+  document.** Needs its own design pass before it's relied upon:
+  decide where curated labels live (edit `run_summary.csv` in place vs.
+  a new `run_summary_curated.csv` vs. reading Phy's TSVs on demand),
+  whether curation is per-shank-Phy-session or needs a merge step across
+  a re-exported day, and whether any pipeline function should validate
+  that a "final" unit list is internally consistent (e.g. no unit ID
+  referenced that no longer exists in Phy's output after a curation
+  session deleted it).
+
 - **No persisted recording-binary cache (NEW this session).**
   `sort_batch.py`'s original `process_day()` called
   `recording.save(folder=binary_path, ...)` once per day and
@@ -834,7 +954,18 @@ active use somewhere and it should be kept in sync too.
   anything needing the exact post-exclusion, post-muting recording — do
   not reimplement the exclusion+muting sequence in a new module.
 
-## 9. Suggested prompt for the next session (`lfp_extractor.py`)
+## 9. Suggested prompt for the next session
+
+> **Before `lfp_extractor.py`:** this pipeline was put on hold with
+> `run_pipeline.py` untested against real data (§4f) and no manual-
+> Phy-curation round-trip designed (§7, §12). If you're picking this
+> back up after having actually run `health_check.py` → `ap_sorter.py`
+> → `quality_control.py` manually on real data, start by reporting what
+> broke (if anything) so §10's "never exercised" caveats can be updated
+> or retired module-by-module. If curation has happened on real data by
+> then, the §7 round-trip question should probably be resolved before
+> `lfp_extractor.py`, since LFP work will likely want to know which
+> units survived curation.
 
 > Continuing work on `ephys_pipeline`. Read `ARCHITECTURE.md` first
 > (especially §7's open questions on the recording-binary cache and
@@ -958,7 +1089,32 @@ written in) — run these yourself before a full batch:
        verification above)? Run once with `--skip-plots` to confirm the
        rest of the pipeline (numerical results, `run_summary.csv`) is
        byte-identical either way.
-6. **`lfp_extractor.py`** (once it exists): analogous checks, plus the
+6. **`run_pipeline.py` (NEW — deferred by the user this session, do this
+   before relying on it):**
+   - `python run_pipeline.py --env local check` and `--env local
+     health-check --preflight` — confirm both run against your real
+     environment (this was only tested against stub modules with no
+     SpikeInterface install, so imports alone are unverified).
+   - `python run_pipeline.py --env local list-jobs --out jobs.csv`
+     against real data — confirm the CSV matches
+     `io_utils.find_sessions()` output directly.
+   - Run `health-check --report`, then `sort`, then `qc` individually
+     through `run_pipeline.py` on one real day, and confirm each
+     produces byte-identical output to running that module's own CLI
+     directly with the same flags (this is a pure passthrough — any
+     difference is a bug in `run_pipeline.py`, not the wrapped module).
+   - `python run_pipeline.py --env local run-all --animal X --date Y`
+     end-to-end on one real day — confirm it matches manually chaining
+     the three modules (which is what the user is doing instead, for
+     now — see §4f).
+   - `python run_pipeline.py --env fox sort --job-list jobs.csv
+     --job-index 0` — confirm this resolves to the intended animal/day
+     before submitting a real Slurm array; test a 2-task array
+     (`--array=0-1`) before a full-size one.
+   - Deliberately trigger the STALE REPORT path through `run-all` (see
+     step 5's stale-report test above) and confirm the error surfaces
+     with the correct exit code.
+7. **`lfp_extractor.py`** (once it exists): analogous checks, plus the
    channel-exclusion-policy decision from §9 above.
 
 ## 11. Interpreting `quality_control.py`'s QC figures
@@ -1018,3 +1174,63 @@ outright `SKIPPED` status) before trusting its `run_summary.csv` rows.
   `run_summary.csv`** — that's the commented header block in
   `run_summary.csv` itself (§5); panel I is a visual convenience copy of
   the same values, not a separate source of truth.
+
+## 12. Workflow after running the pipeline (manual curation)
+
+This section describes what a person actually does after
+`health_check.py --report` → `ap_sorter.py --run` →
+`quality_control.py --run` (or `run_pipeline.py run-all`) have finished
+for an animal/day — i.e. everything downstream of the automated pipeline,
+up to the point of trusting a final unit list for analysis.
+
+1. **Review `health_report.txt`/`health_report.json` before trusting
+   anything downstream.** Check which shanks were `SKIPPED` and why,
+   how many channels were excluded per shank, and (if
+   `--spectral-check` was used) whether periodic-discharge hits showed
+   up — none of this is filtered automatically beyond the configured
+   thresholds; a shank with borderline exclusion counts is worth a
+   second look before spending GPU time sorting it.
+
+2. **Sanity-check `run_summary.csv` and the QC figures (§11)** for each
+   shank: does `qc_overview.png` show one shank behaving very
+   differently from its neighbours (§11's cross-shank-anomaly guidance)?
+   Do the SNR/ISI and isolation-distance/L-ratio panels (A/B) show a
+   sensible SUA/MUA/Noise split, or a cluster of points sitting just
+   past a threshold line that suggests the thresholds need recalibrating
+   for this recording rather than the units being genuinely bad?
+
+3. **Open each `shank_<id>_phy/` folder in Phy** (`phy template-gui
+   params.py` inside that folder) for manual curation: verify waveform
+   shape/amplitude for units flagged as SUA, check for drift the
+   automated metrics wouldn't catch, merge over-split clusters, split
+   contaminated ones, and relabel obvious noise the heuristic missed.
+   Prioritize units near the decision boundaries shown in panels A/B —
+   those are the ones most likely to have their heuristic label
+   overturned by a human look. Because `export_shank_to_phy()` is called
+   on the SAME reconstructed recording Kilosort4 actually sorted (§4c/§6
+   guarantee), what you see in Phy is exactly what was clustered — not
+   an approximation.
+
+4. **Currently a manual, off-pipeline step (see §7's new open
+   question):** there is no function that reads Phy's curation output
+   (`cluster_group.tsv`, `cluster_info.tsv`) back into
+   `run_summary.csv` or anywhere else in this pipeline. Until that's
+   built, treat `run_summary.csv`'s `classification` column as the
+   **pre-curation heuristic screen** — useful for triage and QC, not
+   the final word — and keep your own record (a copy of the CSV, a lab
+   notebook entry, or a small ad-hoc script reading Phy's TSVs
+   directly) of which units survived curation and under what label, per
+   shank per day. Do this consistently now, even manually, so that
+   whatever the eventual round-trip mechanism looks like has real
+   curation records to reconcile against rather than starting from
+   nothing.
+
+5. **Cross-session/cross-day unit identity** (e.g. tracking the same
+   putative unit across trial/sleep sessions within a day, or across
+   days) is **not handled by this pipeline at all** — `quality_control.py`
+   assesses one animal/day(/session) in isolation, and `SUA`/`MUA`/
+   `Noise/Artefact` labels and unit IDs are not guaranteed comparable
+   across separate `run_summary.csv` files. If cross-day tracking is
+   part of the eventual analysis plan, that is a distinct, unscoped
+   piece of work — flag it explicitly before assuming unit IDs mean the
+   same thing on two different days.

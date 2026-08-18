@@ -2,7 +2,7 @@
 
 paths:
   base_path: "\\\\biotin4.hpc.uio.no\\boccaraarea2\\Data\\Animals\\data"
-  output_base_path: "\\\\biotin4.hpc.uio.no\\boccaraarea2\\Analyses\\Researchers\\Mats\\CA2_and_social_development\\ephys_output"            # null -> write alongside raw data
+  output_base_path: "\\\\biotin4.hpc.uio.no\\boccaraarea2\\Analyses\\Researchers\\Mats\\CA2\\ephys_output"            # null -> write alongside raw data
   stage_raw_locally: "C:/Users/matshhe/Desktop/CA2/scratch"           # e.g. "C:/Users/matshhe/scratch" - recommended
                                      # given base_path is a network/UNC mount
   binary_cache_dir: null
